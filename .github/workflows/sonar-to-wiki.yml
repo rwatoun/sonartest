@@ -59,83 +59,92 @@ jobs:
           mkdir -p out
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          echo "Waiting for SonarCloud background processing..."
-          sleep 40 # Increased wait for issues and ratings to populate
+          echo "Waiting for SonarCloud processing..."
+          sleep 40 
 
-          # 1. Fetch Measures
+          # 1. Fetch Overall Measures (using 'component' API for total counts)
           curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,ncloc,duplicated_lines_density,cognitive_complexity,sqale_index,bugs,vulnerabilities,code_smells,security_hotspots,coverage,security_rating,reliability_rating" \
+            "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,vulnerabilities,code_smells,security_hotspots,security_review_rating,security_rating,reliability_rating,sqale_rating,coverage,ncloc" \
             > out/metrics.json
 
-          # 2. Fetch Quality Gate Details (To see WHY it failed)
+          # 2. Fetch Quality Gate Details
           curl -s -u "${SONAR_TOKEN}:" \
             "https://sonarcloud.io/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" \
             > out/gate_status.json
 
-          # 3. Fetch Top 5 Issues
+          # 3. Fetch Hotspot Details (Specific API for Hotspots)
           curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=5&s=SEVERITY&asc=false" \
+            "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}&status=TO_REVIEW&ps=5" \
+            > out/hotspots.json
+
+          # 4. Fetch Detailed Issues (Bugs & Smells)
+          curl -s -u "${SONAR_TOKEN}:" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&types=BUG,CODE_SMELL&ps=10&s=SEVERITY&asc=false" \
             > out/issues.json
 
           # Helper functions
           metric () { jq -r --arg k "$1" '.component.measures[]? | select(.metric==$k) | .value' out/metrics.json | head -n 1; }
           
-          # Improved Rating Converter (Handles 1, 1.0, or empty)
           get_rating () {
             val=$(metric "$1")
             case "${val%.*}" in
-              1) echo "A" ;;
-              2) echo "B" ;;
-              3) echo "C" ;;
-              4) echo "D" ;;
-              5) echo "E" ;;
-              *) echo "N/A" ;;
+              1) echo "A" ;; 2) echo "B" ;; 3) echo "C" ;; 4) echo "D" ;; 5) echo "E" ;; *) echo "N/A" ;;
             esac
           }
 
           QUALITY_GATE=$(jq -r '.projectStatus.status' out/gate_status.json)
 
           {
-            echo "# 🚀 Code Quality Report – ${VERSION}"
-            echo "### Quality Gate: $([[ "$QUALITY_GATE" == "OK" ]] && echo "✅ PASSED" || echo "❌ FAILED")"
+            echo "# 🚀 Overall Code Quality Report – ${VERSION}"
+            echo "### Quality Gate Status: $([[ "$QUALITY_GATE" == "OK" ]] && echo "✅ PASSED" || echo "❌ FAILED")"
             echo ""
 
-            # --- WHY DID IT FAIL? ---
             if [ "$QUALITY_GATE" != "OK" ]; then
-              echo "#### ⚠️ Failure Reasons:"
-              jq -r '.projectStatus.conditions[] | select(.status=="ERROR") | "- **\(.metricKey)**: Actual value \(.actualValue) (Threshold: \(.comparator) \(.errorThreshold))"' out/gate_status.json >> "$REPORT"
+              echo "#### ⚠️ Why it failed:"
+              jq -r '.projectStatus.conditions[] | select(.status=="ERROR") | "- **\(.metricKey)**: Actual \(.actualValue) (Goal: \(.comparator) \(.errorThreshold))"' out/gate_status.json >> "$REPORT"
               echo ""
             fi
 
-            echo "## 📈 Key Performance Indicators"
-            echo "| Metric | Value | Rating |"
+            echo "## 🛡️ Security & Hotspots"
+            echo "| Metric | Total Count | Rating |"
             echo "|---|---|---|"
-            echo "| **Reliability** | $(metric bugs || echo 0) Bugs | $(get_rating reliability_rating) |"
-            echo "| **Security** | $(metric vulnerabilities || echo 0) Vulns | $(get_rating security_rating) |"
-            echo "| **Test Coverage** | $(metric coverage || echo 0)% | - |"
-            echo "| **Technical Debt** | $(metric sqale_index || echo 0) min | - |"
+            echo "| Security Hotspots | $(metric security_hotspots || echo 0) | $(get_rating security_review_rating) |"
+            echo "| Vulnerabilities | $(metric vulnerabilities || echo 0) | $(get_rating security_rating) |"
+            echo ""
+            
+            # Hotspot Details Block
+            if [ "$(jq '.hotspots | length' out/hotspots.json)" -gt 0 ]; then
+              echo "#### 🔍 Security Hotspot Details"
+              echo "| Severity | Security Category | File |"
+              echo "|---|---|---|"
+              jq -r '.hotspots[] | "| \(.vulnerabilityProbability) | \(.securityCategory) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
+              echo ""
+            fi
+
+            echo "## 🛠️ Reliability & Maintainability"
+            echo "| Metric | Total Count | Rating |"
+            echo "|---|---|---|"
+            echo "| Bugs | $(metric bugs || echo 0) | $(get_rating reliability_rating) |"
+            echo "| Code Smells | $(metric code_smells || echo 0) | $(get_rating sqale_rating) |"
             echo ""
 
-            echo "## ⚠️ Top 5 Unresolved Issues"
-            echo "| Severity | Issue | File |"
-            echo "|---|---|---|"
-            # Check if issues exist
-            if [ "$(jq '.issues | length' out/issues.json)" -eq 0 ]; then
-              echo "| - | No issues detected (or still processing) | - |" >> "$REPORT"
-            else
-              jq -r '.issues[] | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+            # Issue Details Block (Bugs and Smells)
+            if [ "$(jq '.issues | length' out/issues.json)" -gt 0 ]; then
+              echo "#### 🐞 Bug & Code Smell Details"
+              echo "| Type | Severity | Message | File |"
+              echo "|---|---|---|---|"
+              jq -r '.issues[] | "| \(.type) | \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+              echo ""
             fi
-            
-            echo ""
-            echo "## 📐 All Metrics"
+
+            echo "## 📐 General Measures (Overall)"
             echo "| Metric | Value |"
             echo "|---|---:|"
-            echo "| Lines of Code | $(metric ncloc || echo 0) |"
-            echo "| Duplication | $(metric duplicated_lines_density || echo 0)% |"
-            echo "| Cognitive Complexity | $(metric cognitive_complexity || echo 0) |"
+            echo "| Lines of Code | $(metric ncloc) |"
+            echo "| Test Coverage | $(metric coverage || echo 0)% |"
             echo ""
             echo "---"
-            echo "_Dashboard: [SonarCloud](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})_"
+            echo "_Generated on $(date -u) | [Full Dashboard](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})_"
           } > "$REPORT"
           
       - name: Publish to Wiki
