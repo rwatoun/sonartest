@@ -1,9 +1,9 @@
-name: Release Quality Report 
+name: Release Quality Report
 
 on:
   push:
     tags:
-      - "v[0-9]*.0.0"  
+      - "v[0-9]*.0.0"
   workflow_dispatch:
     inputs:
       version:
@@ -12,22 +12,19 @@ on:
         default: "v0.0.0-test"
 
 env:
-  VERSION: ${{ inputs.version || github.ref_name }}
+  # Uses the input version if manually triggered, otherwise uses the tag name
+  VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 permissions:
-  contents: write   
+  contents: write
 
 jobs:
   release_report:
     runs-on: ubuntu-latest
 
-    env:
-      SONAR_ORG: ${{ secrets.SONAR_ORG }}
-      SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -39,34 +36,34 @@ jobs:
           args: >
             -Dsonar.organization=${{ secrets.SONAR_ORG }}
             -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
-            -Dsonar.sources=frontend
+            -Dsonar.sources=.
             -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/.venv/**,**/__pycache__/**
 
-      - name: Generate SonarCloud report 
+      - name: Generate Detailed SonarCloud Report
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          VERSION: $VERSION 
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
         run: |
           set -e
           mkdir -p out
-
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          # Fetch key measures
+          # Fetch key measures from SonarCloud API
           curl -s -u "${SONAR_TOKEN}:" \
             "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,ncloc,duplicated_lines_density,comment_lines_density,cognitive_complexity,sqale_index,bugs,vulnerabilities,code_smells,security_hotspots" \
             > out/metrics.json
 
-          # Helper to get metric value by key (prints N/A if missing)
+          # Helper functions to extract data
           metric () {
             jq -r --arg k "$1" '.component.measures[]? | select(.metric==$k) | .value' out/metrics.json | head -n 1
           }
           val_or_na () {
             v="$(metric "$1")"
-            if [ -z "$v" ] || [ "$v" = "null" ]; then echo "N/A"; else echo "$v"; fi
+            if [ -z "$v" ] || [ "$v" = "null" ]; then echo "0"; else echo "$v"; fi
           }
 
-          QUALITY_GATE="$(val_or_na alert_status)"
+          # Assign variables
+          QUALITY_GATE="$(metric alert_status)"
           LOC="$(val_or_na ncloc)"
           DUP="$(val_or_na duplicated_lines_density)"
           DOC="$(val_or_na comment_lines_density)"
@@ -77,73 +74,62 @@ jobs:
           SMELLS="$(val_or_na code_smells)"
           HOTSPOTS="$(val_or_na security_hotspots)"
 
-          # Convert sqale_index to human-readable if numeric
-          if echo "$DEBT_MIN" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
-            DEBT_INT=$(printf "%.0f" "$DEBT_MIN")
-            HOURS=$((DEBT_INT / 60))
-            MINS=$((DEBT_INT % 60))
-            TECH_DEBT="${HOURS}h ${MINS}m"
-          else
-            TECH_DEBT="$DEBT_MIN"
-          fi
+          # Convert Technical Debt minutes to hours/mins
+          DEBT_INT=$(printf "%.0f" "$DEBT_MIN")
+          HOURS=$((DEBT_INT / 60))
+          MINS=$((DEBT_INT % 60))
+          TECH_DEBT="${HOURS}h ${MINS}m"
 
+          # Construct the Markdown Report
           {
-            echo "# Code Quality and Security Report – ${VERSION}"
+            echo "# 🚀 Code Quality Report – ${VERSION}"
             echo ""
-            echo "**Release tag:** \`${VERSION}\`"
-            echo "**Commit:** \`${GITHUB_SHA}\`"
-            echo "**Generated (UTC):** \`$(date -u +'%Y-%m-%d %H:%M')\`"
+            echo "### Status Badges"
+            echo "[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=${SONAR_PROJECT_KEY}&metric=alert_status)](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})"
+            echo "[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=${SONAR_PROJECT_KEY}&metric=bugs)](https://sonarcloud.io/project/issues?id=${SONAR_PROJECT_KEY}&resolved=false&types=BUG)"
             echo ""
-            echo "## Quality Gate"
-            echo "- Status: **${QUALITY_GATE}**"
+            echo "---"
+            echo "## 📊 Executive Summary"
+            echo "- **Release Tag:** \`${VERSION}\`"
+            echo "- **Commit SHA:** \`${GITHUB_SHA}\`"
+            echo "- **Quality Gate:** **${QUALITY_GATE}**"
+            echo "- **Full Analysis:** [View Dashboard on SonarCloud](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})"
             echo ""
-            echo "## Software Metrics (Current Release)"
-            echo "| Category | Metric | Value |"
-            echo "|---|---|---:|"
-            echo "| Size | Lines of Code (ncloc) | ${LOC} |"
-            echo "| Duplication | Duplicated Lines (%) | ${DUP} |"
-            echo "| Documentation | Comment Density (%) | ${DOC} |"
-            echo "| Complexity | Cognitive Complexity | ${CCO} |"
+            echo "## 📐 Technical Metrics"
+            echo "| Category | Metric | Value | Status |"
+            echo "|---|---|---|---|"
+            echo "| 📁 Size | Lines of Code | ${LOC} | -" |
+            echo "| 👯 Duplication | Duplicated Lines | ${DUP}% | $([ $(echo "$DUP < 5" | bc) -eq 1 ] && echo "✅" || echo "⚠️") |"
+            echo "| 📝 Docs | Comment Density | ${DOC}% | -" |
+            echo "| 🧠 Logic | Cognitive Complexity | ${CCO} | -" |
             echo ""
-            echo "## Maintainability / Technical Debt"
-            echo "| Metric | Value |"
-            echo "|---|---:|"
-            echo "| Technical Debt (est.) | ${TECH_DEBT} |"
-            echo "| Code Smells (convention violations proxy) | ${SMELLS} |"
+            echo "## 🛡️ Security & Reliability"
+            echo "| Metric | Count | Action |"
+            echo "|---|---|---|"
+            echo "| 🐞 Bugs | ${BUGS} | $([ "$BUGS" -eq 0 ] && echo "✅ Clean" || echo "❌ Requires Fix") |"
+            echo "| 🛡️ Vulnerabilities | ${VULNS} | $([ "$VULNS" -eq 0 ] && echo "✅ Secure" || echo "❌ Critical") |"
+            echo "| ⚡ Security Hotspots | ${HOTSPOTS} | $([ "$HOTSPOTS" -eq 0 ] && echo "✅ Clean" || echo "🔍 Review") |"
+            echo "| 💸 Tech Debt | ${TECH_DEBT} | ${SMELLS} Smells |"
             echo ""
-            echo "## Reliability & Security"
-            echo "| Metric | Value |"
-            echo "|---|---:|"
-            echo "| Bugs | ${BUGS} |"
-            echo "| Vulnerabilities | ${VULNS} |"
-            echo "| Security Hotspots | ${HOTSPOTS} |"
-            echo ""
-            echo "## Notes"
-            echo "- This report is generated automatically from SonarCloud measures for the tagged release."
+            echo "---"
+            echo "_Report generated automatically via GitHub Actions._"
           } > "$REPORT"
 
-          echo "Generated $REPORT"
-          ls -la out
-
-      - name: Publish report to GitHub Wiki (one page per release)
+      - name: Publish to Wiki
         env:
-          VERSION: $VERSION
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-
           git config --global user.email "github-actions@github.com"
           git config --global user.name "github-actions"
-
-          # Clone wiki repo
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.wiki.git" wiki
-
-          # One page per release
-          PAGE="wiki/Code-Quality-${VERSION}.md"
-          cp "out/Code-Quality-${VERSION}.md" "$PAGE"
-
-          cd wiki
+          
+          # Clone the wiki repository
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.wiki.git" wiki_repo
+          
+          # Copy the generated report to the wiki folder
+          cp out/Code-Quality-${VERSION}.md wiki_repo/
+          
+          cd wiki_repo
           git add .
-          git commit -m "Add SonarCloud quality report for ${VERSION}" || echo "No changes to commit."
+          git commit -m "Update quality report for ${VERSION}" || echo "No changes"
           git push
