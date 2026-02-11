@@ -59,64 +59,84 @@ jobs:
           mkdir -p out
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          echo "Waiting for SonarCloud to process background tasks..."
-          sleep 20 # Essential to avoid "Error/Null" Quality Gate status
+          echo "Waiting for SonarCloud background processing..."
+          sleep 40 # Increased wait for issues and ratings to populate
 
-          # 1. Fetch Measures (Added Coverage, Security Rating, and Reliability Rating)
+          # 1. Fetch Measures
           curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,ncloc,duplicated_lines_density,comment_lines_density,cognitive_complexity,sqale_index,bugs,vulnerabilities,code_smells,security_hotspots,coverage,security_rating,reliability_rating" \
+            "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,ncloc,duplicated_lines_density,cognitive_complexity,sqale_index,bugs,vulnerabilities,code_smells,security_hotspots,coverage,security_rating,reliability_rating" \
             > out/metrics.json
 
-          # 2. Fetch Top 5 Issues
+          # 2. Fetch Quality Gate Details (To see WHY it failed)
+          curl -s -u "${SONAR_TOKEN}:" \
+            "https://sonarcloud.io/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" \
+            > out/gate_status.json
+
+          # 3. Fetch Top 5 Issues
           curl -s -u "${SONAR_TOKEN}:" \
             "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=5&s=SEVERITY&asc=false" \
             > out/issues.json
 
-          # Extractors
+          # Helper functions
           metric () { jq -r --arg k "$1" '.component.measures[]? | select(.metric==$k) | .value' out/metrics.json | head -n 1; }
-          val_or_na () { v="$(metric "$1")"; if [ -z "$v" ] || [ "$v" = "null" ]; then echo "0"; else echo "$v"; fi; }
-
-          # Ratings conversion (Sonar gives 1-5, we want A-E)
+          
+          # Improved Rating Converter (Handles 1, 1.0, or empty)
           get_rating () {
-            case "$1" in 1) echo "A" ;; 2) echo "B" ;; 3) echo "C" ;; 4) echo "D" ;; 5) echo "E" ;; *) echo "N/A" ;; esac
+            val=$(metric "$1")
+            case "${val%.*}" in
+              1) echo "A" ;;
+              2) echo "B" ;;
+              3) echo "C" ;;
+              4) echo "D" ;;
+              5) echo "E" ;;
+              *) echo "N/A" ;;
+            esac
           }
 
-          QUALITY_GATE="$(metric alert_status)"
-          # Fallback for empty quality gate
-          if [ "$QUALITY_GATE" = "null" ] || [ -z "$QUALITY_GATE" ]; then QUALITY_GATE="PENDING/UNKNOWN"; fi
+          QUALITY_GATE=$(jq -r '.projectStatus.status' out/gate_status.json)
 
           {
             echo "# 🚀 Code Quality Report – ${VERSION}"
-            echo "### Status: $([[ "$QUALITY_GATE" == "OK" ]] && echo "✅ PASSED" || echo "❌ FAILED/WARNING")"
+            echo "### Quality Gate: $([[ "$QUALITY_GATE" == "OK" ]] && echo "✅ PASSED" || echo "❌ FAILED")"
             echo ""
-            echo "[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=${SONAR_PROJECT_KEY}&metric=alert_status)](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})"
-            echo ""
+
+            # --- WHY DID IT FAIL? ---
+            if [ "$QUALITY_GATE" != "OK" ]; then
+              echo "#### ⚠️ Failure Reasons:"
+              jq -r '.projectStatus.conditions[] | select(.status=="ERROR") | "- **\(.metricKey)**: Actual value \(.actualValue) (Threshold: \(.comparator) \(.errorThreshold))"' out/gate_status.json >> "$REPORT"
+              echo ""
+            fi
+
             echo "## 📈 Key Performance Indicators"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| **Reliability** | ${BUGS} Bugs | $(get_rating $(val_or_na reliability_rating)) |"
-            echo "| **Security** | ${VULNS} Vulns | $(get_rating $(val_or_na security_rating)) |"
-            echo "| **Test Coverage** | $(val_or_na coverage)% | - |"
-            echo "| **Technical Debt** | $(val_or_na sqale_index) min | - |"
+            echo "| **Reliability** | $(metric bugs || echo 0) Bugs | $(get_rating reliability_rating) |"
+            echo "| **Security** | $(metric vulnerabilities || echo 0) Vulns | $(get_rating security_rating) |"
+            echo "| **Test Coverage** | $(metric coverage || echo 0)% | - |"
+            echo "| **Technical Debt** | $(metric sqale_index || echo 0) min | - |"
             echo ""
+
             echo "## ⚠️ Top 5 Unresolved Issues"
-            echo "| Severity | Issue | Component |"
+            echo "| Severity | Issue | File |"
             echo "|---|---|---|"
-            # Parse issues.json into markdown table rows
-            jq -r '.issues[] | "| \(.severity) | \(.message) | \(.component) |"' out/issues.json >> "$REPORT" || echo "| - | No issues found | - |" >> "$REPORT"
+            # Check if issues exist
+            if [ "$(jq '.issues | length' out/issues.json)" -eq 0 ]; then
+              echo "| - | No issues detected (or still processing) | - |" >> "$REPORT"
+            else
+              jq -r '.issues[] | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+            fi
             
             echo ""
             echo "## 📐 All Metrics"
             echo "| Metric | Value |"
             echo "|---|---:|"
-            echo "| Lines of Code | $(val_or_na ncloc) |"
-            echo "| Duplication | $(val_or_na duplicated_lines_density)% |"
-            echo "| Cognitive Complexity | $(val_or_na cognitive_complexity) |"
+            echo "| Lines of Code | $(metric ncloc || echo 0) |"
+            echo "| Duplication | $(metric duplicated_lines_density || echo 0)% |"
+            echo "| Cognitive Complexity | $(metric cognitive_complexity || echo 0) |"
             echo ""
             echo "---"
-            echo "_Full Report: [SonarCloud Dashboard](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})_"
-          } >> "$REPORT"
-
+            echo "_Dashboard: [SonarCloud](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})_"
+          } > "$REPORT"
           
       - name: Publish to Wiki
         env:
