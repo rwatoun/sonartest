@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version label (e.g., v2.0.0)"
+        description: "Version/tag label to use"
         required: true
-        default: "v1.0.0"
+        default: "v0.0.0"
 
 env:
   VERSION: ${{ github.event.inputs.version || github.ref_name }}
@@ -75,13 +75,12 @@ jobs:
           COV=$(metric coverage || echo 0)
           HOTSPOTS=$(metric security_hotspots || echo 0)
 
-          # evolution logic!!
+          # evolution logic
           MAJOR=$(echo $VERSION | cut -d. -f1 | tr -d 'v')
           PREV_MAJOR=$((MAJOR - 1))
           PREV_VERSION="v${PREV_MAJOR}.0.0"
           PREV_FILE="wiki_repo/Code-Quality-${PREV_VERSION}.md"
 
-          # if no previous versions
           HAS_PREV=false
           if [ -f "$PREV_FILE" ]; then
             HAS_PREV=true
@@ -91,7 +90,7 @@ jobs:
             OLD_HOTSPOTS=$(grep "| Hotspots to Review |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
           fi
 
-          {
+          { # new
             echo "# Code Quality Report - ${VERSION}"
             echo "---"
 
@@ -99,28 +98,32 @@ jobs:
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
             echo "| Total Bugs | $BUGS | $(get_rating reliability_rating) |"
+            
             if [ "$BUGS" -gt 0 ]; then
               echo -e "\n### Bug Details"
               echo "| Severity | Message | File |"
               echo "|---|---|---|"
-              jq -r '.issues[] | select(.type=="BUG") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+              jq -r '.issues[] | select(.type=="BUG") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json # new
             fi
 
             echo -e "\n## Maintainability"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
             echo "| Code Smells | $SMELLS | $(get_rating sqale_rating) |"
+            
             if [ "$SMELLS" -gt 0 ]; then
               echo -e "\n### Code Smell Details"
               echo "| Severity | Message | File |"
               echo "|---|---|---|"
-              jq -r '.issues[] | select(.type=="CODE_SMELL") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+              jq -r '.issues[] | select(.type=="CODE_SMELL") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json | head -n 50 # new
+              if [ "$SMELLS" -gt 50 ]; then echo -e "\n*(Showing first 50 code smells)*"; fi # new
             fi
 
             echo -e "\n## Security Review"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
             echo "| Hotspots to Review | $HOTSPOTS | $(get_rating security_review_rating) |"
+            
             if [ "$HOTSPOTS" -gt 0 ]; then
               echo -e "\n### Security Review: Hotspot Details"
               echo "| Probability | Message | File:Line |"
@@ -131,7 +134,7 @@ jobs:
                 MSG=$(jq -r '.message' out/temp_hotspot.json)
                 FILE=$(jq -r '.component.path' out/temp_hotspot.json)
                 LINE=$(jq -r '.line' out/temp_hotspot.json)
-                echo "| $PROB | $MSG | \`$FILE:$LINE\` |" >> "$REPORT"
+                echo "| $PROB | $MSG | \`$FILE:$LINE\` |" # new
               done
             fi
 
@@ -147,14 +150,14 @@ jobs:
             echo "| Lines of Code (NCLOC) | $(metric ncloc || echo 0) | - |"
             VULNS=$(metric vulnerabilities || echo 0)
             echo "| Vulnerabilities | $VULNS | $(get_rating security_rating) |"
+            
             if [ "$VULNS" -gt 0 ]; then
                echo -e "\n### Vulnerability Details"
                echo "| Severity | Message | File |"
                echo "|---|---|---|"
-               jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+               jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json # new
             fi
 
-            # metrics evolution
             if [ "$HAS_PREV" = true ]; then
               echo -e "\n## Metrics Evolution"
               echo "Comparing **${PREV_VERSION}** & **${VERSION}**"
@@ -175,8 +178,7 @@ jobs:
               echo "  H1(Hotspots: $OLD_HOTSPOTS) --> H2(Hotspots: $HOTSPOTS)"
               echo "\`\`\`"
             fi
-            
-          } >> "$REPORT"
+          } > "$REPORT" # new
 
       # 4. publishing to wiki
       - name: Publish to Wiki
