@@ -55,114 +55,90 @@ jobs:
           mkdir -p out
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          echo "Waiting for SonarCloud API to refresh..."
+          echo "Waiting for SonarCloud API..."
           sleep 45 
 
-          # Fetch Overall Data
+          # 1. Fetch Master Metrics
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc,vulnerabilities,security_rating" > out/metrics.json
-          curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}" > out/hotspots.json
+          
+          # 2. Fetch General Issues
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=100" > out/issues.json
+
+          # 3. Fetch Hotspot List (to get the keys)
+          curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}&status=TO_REVIEW" > out/hotspot_list.json
 
           # Helper functions
           metric () { jq -r --arg k "$1" '.component.measures[]? | select(.metric==$k) | .value' out/metrics.json | head -n 1; }
           get_rating () {
-            val=$(metric "$1"); case "${val%.*}" in 1) echo "A" ;; 2) echo "B" ;; 3) echo "C" ;; 4) echo "D" ;; 5) echo "E" ;; *) echo "N/A" ;; esac
+            val=$(metric "$1"); case "${val%.*}" in 1) echo "A" ;; 2) echo "B" ;; 3) echo "C" ;; 4) echo "D" ;; 5) echo "E" ;; *) echo "-" ;; esac
           }
 
-          # Get current values for evolution comparison
           BUGS=$(metric bugs || echo 0)
           SMELLS=$(metric code_smells || echo 0)
+          HOTSPOTS=$(metric security_hotspots || echo 0)
+          VULNS=$(metric vulnerabilities || echo 0)
           COV=$(metric coverage || echo 0)
-
-          # --- EVOLUTION LOGIC ---
-          MAJOR=$(echo $VERSION | cut -d. -f1 | tr -d 'v')
-          PREV_MAJOR=$((MAJOR - 1))
-          PREV_VERSION="v${PREV_MAJOR}.0.0"
-          PREV_FILE="wiki_repo/Code-Quality-${PREV_VERSION}.md"
-
-          if [ -f "$PREV_FILE" ]; then
-            OLD_BUGS=$(grep "| Total Bugs |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
-            OLD_SMELLS=$(grep "| Code Smells |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
-            OLD_COV=$(grep "| Overall Line Coverage |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' %' || echo 0)
-          else
-            OLD_BUGS=0; OLD_SMELLS=0; OLD_COV=0
-          fi
+          DUP=$(metric duplicated_lines_density || echo 0)
+          LOC=$(metric ncloc || echo 0)
 
           {
-            echo "# Deep Quality Report: ${VERSION}"
+            echo "# Quality Report: ${VERSION}"
             echo "---"
 
-            # --- SECTIONS ---
-            echo -e "\n## Reliability"
-            echo "| Metric | Value | Rating |"
-            echo "|---|---|---|"
-            echo "| Total Bugs | $BUGS | $(get_rating reliability_rating) |"
+            # Master Summary Table
+            echo "## Master Metrics Summary"
+            echo "| Measure | Metric | Rating | Value |"
+            echo "|---|---|:---:|---|"
+            echo "| **Reliability** | Total Bugs | $(get_rating reliability_rating) | $BUGS |"
+            echo "| **Maintainability** | Code Smells | $(get_rating sqale_rating) | $SMELLS |"
+            echo "| **Security Review** | Hotspots | $(get_rating security_review_rating) | $HOTSPOTS |"
+            echo "| **Security** | Vulnerabilities | $(get_rating security_rating) | $VULNS |"
+            echo "| **Coverage** | Unit Test Coverage | - | ${COV}% |"
+            echo "| **Duplication** | Duplicated Lines | - | ${DUP}% |"
+            echo "| **Size** | Lines of Code | - | $LOC |"
+            echo ""
+
+            echo "## Detailed Findings"
+            
+            # --- IMPROVED HOTSPOT DETAILS ---
+            if [ "$HOTSPOTS" -gt 0 ]; then
+              echo "### Security Review: Hotspot Details"
+              echo "| Probability | Message | File:Line |"
+              echo "|---|---|---|"
+              
+              # Loop through each hotspot key found in the search
+              for key in $(jq -r '.hotspots[].key' out/hotspot_list.json); do
+                # Fetch the specific details for this hotspot
+                curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/hotspots/show?hotspot=$key" > out/temp_hotspot.json
+                
+                # Extract details based on the schema you provided
+                PROB=$(jq -r '.rule.vulnerabilityProbability' out/temp_hotspot.json)
+                MSG=$(jq -r '.message' out/temp_hotspot.json)
+                FILE=$(jq -r '.component.path' out/temp_hotspot.json)
+                LINE=$(jq -r '.line' out/temp_hotspot.json)
+                
+                echo "| $PROB | $MSG | \`$FILE:$LINE\` |" >> "$REPORT"
+              done
+              echo ""
+            fi
+
+            # --- OTHER DETAILS (Bugs, Smells, etc.) ---
             if [ "$BUGS" -gt 0 ]; then
-              echo -e "\n### Bug Details"
+              echo "### Reliability: Bug Details"
               echo "| Severity | Message | File |"
               echo "|---|---|---|"
               jq -r '.issues[] | select(.type=="BUG") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            echo -e "\n## Maintainability"
-            echo "| Metric | Value | Rating |"
-            echo "|---|---|---|"
-            echo "| Code Smells | $SMELLS | $(get_rating sqale_rating) |"
             if [ "$SMELLS" -gt 0 ]; then
-              echo -e "\n### Code Smell Details"
+              echo -e "\n### Maintainability: Code Smell Details"
               echo "| Severity | Message | File |"
               echo "|---|---|---|"
               jq -r '.issues[] | select(.type=="CODE_SMELL") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            echo -e "\n## Security Review"
-            HOTSPOTS=$(metric security_hotspots || echo 0)
-            echo "| Metric | Value | Rating |"
-            echo "|---|---|---|"
-            echo "| Hotspots to Review | $HOTSPOTS | $(get_rating security_review_rating) |"
-            if [ "$HOTSPOTS" -gt 0 ]; then
-              echo -e "\n### Security Hotspot Details"
-              echo "| Probability | Category | Component |"
-              echo "|---|---|---|"
-              jq -r '.hotspots[] | "| \(.vulnerabilityProbability) | \(.securityCategory) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
-            fi
-
-            echo -e "\n## Coverage & Duplication"
-            echo "| Metric | Value |"
-            echo "|---|---|"
-            echo "| Overall Line Coverage | ${COV}% |"
-            echo "| Duplicated Lines (%) | $(metric duplicated_lines_density || echo 0)% |"
-
-            echo -e "\n## Size & Issues"
-            echo "| Metric | Value | Rating |"
-            echo "|---|---|---|"
-            echo "| Lines of Code (NCLOC) | $(metric ncloc || echo 0) | - |"
-            VULNS=$(metric vulnerabilities || echo 0)
-            echo "| Vulnerabilities | $VULNS | $(get_rating security_rating) |"
-            if [ "$VULNS" -gt 0 ]; then
-               echo -e "\n### Vulnerability Details"
-               echo "| Severity | Message | File |"
-               echo "|---|---|---|"
-               jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
-            fi
-
-            echo "## Metrics Evolution"
-            echo "Comparing **${PREV_VERSION}** & **${VERSION}**"
-            echo ""
-            echo "| Metric | ${PREV_VERSION} | ${VERSION} | Trend |"
-            echo "|---|---|---|---|"
-            trend() { if [ "$2" -gt "$1" ]; then echo "🔺"; elif [ "$2" -lt "$1" ]; then echo "🔻"; else echo "➖"; fi; }
-            echo "| Bugs | $OLD_BUGS | $BUGS | $(trend $OLD_BUGS $BUGS) |"
-            echo "| Code Smells | $OLD_SMELLS | $SMELLS | $(trend $OLD_SMELLS $SMELLS) |"
-            echo "| Coverage | ${OLD_COV}% | ${COV}% | $(trend $OLD_COV $COV) |"
-            echo ""
-            echo "### Visual Trend"
-            echo "\`\`\`mermaid"
-            echo "graph LR"
-            echo "  B1(Bugs: $OLD_BUGS) --> B2(Bugs: $BUGS)"
-            echo "  S1(Smells: $OLD_SMELLS) --> S2(Smells: $SMELLS)"
-            echo "\`\`\`"
-            
+            echo -e "\n---"
+            echo "_[Full Dashboard](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})_"
           } >> "$REPORT"
 
       # 4. PUBLISH TO WIKI
