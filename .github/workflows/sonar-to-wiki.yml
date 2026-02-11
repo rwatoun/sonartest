@@ -7,12 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version/tag label to use"
+        description: "Version label (e.g., v2.0.0)"
         required: true
-        default: "v0.0.0-test"
+        default: "v1.0.0"
 
 env:
-  # Uses the input version if manually triggered, otherwise uses the tag name
   VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 permissions:
@@ -21,13 +20,20 @@ permissions:
 jobs:
   release_report:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # 1. CLONE WIKI FIRST (To read previous version data)
+      - name: Clone Wiki
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki_repo
+
+      # 2. RUN SONAR SCAN
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v6
         env:
@@ -39,18 +45,8 @@ jobs:
             -Dsonar.sources=.
             -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/.venv/**,**/__pycache__/**
 
-      - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@v6
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          args: >
-            -Dsonar.organization=${{ secrets.SONAR_ORG }}
-            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
-            -Dsonar.sources=.
-            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/.venv/**,**/__pycache__/**
-
-      - name: Generate High-Detail SonarCloud Report
+      # 3. GENERATE ENHANCED REPORT
+      - name: Generate Detailed SonarCloud Report
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
@@ -59,111 +55,125 @@ jobs:
           mkdir -p out
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          # 1. Fetch Measures (Overall Code)
-          curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc,vulnerabilities,security_rating" \
-            > out/metrics.json
+          echo "Waiting for SonarCloud API to refresh..."
+          sleep 45 
 
-          # 2. Fetch Security Hotspots (ProjectKey is mandatory here)
-          curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}" \
-            > out/hotspots.json
+          # Fetch Overall Data
+          curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc,vulnerabilities,security_rating" > out/metrics.json
+          curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}" > out/hotspots.json
+          curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=100" > out/issues.json
 
-          # 3. Fetch Issues (Bugs, Smells, Vulnerabilities)
-          curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=100" \
-            > out/issues.json
-
-          # Helper Functions
+          # Helper functions
           metric () { jq -r --arg k "$1" '.component.measures[]? | select(.metric==$k) | .value' out/metrics.json | head -n 1; }
           get_rating () {
             val=$(metric "$1"); case "${val%.*}" in 1) echo "A" ;; 2) echo "B" ;; 3) echo "C" ;; 4) echo "D" ;; 5) echo "E" ;; *) echo "N/A" ;; esac
           }
 
+          # Get current values for evolution comparison
+          BUGS=$(metric bugs || echo 0)
+          SMELLS=$(metric code_smells || echo 0)
+          COV=$(metric coverage || echo 0)
+
+          # --- EVOLUTION LOGIC ---
+          MAJOR=$(echo $VERSION | cut -d. -f1 | tr -d 'v')
+          PREV_MAJOR=$((MAJOR - 1))
+          PREV_VERSION="v${PREV_MAJOR}.0.0"
+          PREV_FILE="wiki_repo/Code-Quality-${PREV_VERSION}.md"
+
+          if [ -f "$PREV_FILE" ]; then
+            OLD_BUGS=$(grep "| Total Bugs |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
+            OLD_SMELLS=$(grep "| Code Smells |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
+            OLD_COV=$(grep "| Overall Line Coverage |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' %' || echo 0)
+          else
+            OLD_BUGS=0; OLD_SMELLS=0; OLD_COV=0
+          fi
+
           {
-            echo "# 🚀 Deep Quality Report: ${VERSION}"
+            echo "# Deep Quality Report: ${VERSION}"
             echo "---"
 
-            # --- RELIABILITY ---
-            echo "## 🔴 Reliability"
+            # --- SECTIONS ---
+            echo -e "\n## Reliability"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Total Bugs | $(metric bugs || echo 0) | $(get_rating reliability_rating) |"
-            if [ "$(jq '.issues[] | select(.type=="BUG") | .key' out/issues.json | wc -l)" -gt 0 ]; then
-              echo -e "\n### 🐞 Bug Details"
+            echo "| Total Bugs | $BUGS | $(get_rating reliability_rating) |"
+            if [ "$BUGS" -gt 0 ]; then
+              echo -e "\n### Bug Details"
               echo "| Severity | Message | File |"
+              echo "|---|---|---|"
               jq -r '.issues[] | select(.type=="BUG") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            # --- MAINTAINABILITY ---
-            echo -e "\n## 🟡 Maintainability"
+            echo -e "\n## Maintainability"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Code Smells | $(metric code_smells || echo 0) | $(get_rating sqale_rating) |"
-            if [ "$(jq '.issues[] | select(.type=="CODE_SMELL") | .key' out/issues.json | wc -l)" -gt 0 ]; then
-              echo -e "\n### 🧹 Code Smell Details"
+            echo "| Code Smells | $SMELLS | $(get_rating sqale_rating) |"
+            if [ "$SMELLS" -gt 0 ]; then
+              echo -e "\n### Code Smell Details"
               echo "| Severity | Message | File |"
+              echo "|---|---|---|"
               jq -r '.issues[] | select(.type=="CODE_SMELL") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            # --- SECURITY REVIEW (HOTSPOTS) ---
-            echo -e "\n## 🟠 Security Review"
+            echo -e "\n## Security Review"
+            HOTSPOTS=$(metric security_hotspots || echo 0)
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Hotspots to Review | $(metric security_hotspots || echo 0) | $(get_rating security_review_rating) |"
-            if [ "$(jq '.hotspots | length' out/hotspots.json)" -gt 0 ]; then
-              echo -e "\n### 🔍 Security Hotspot Details"
+            echo "| Hotspots to Review | $HOTSPOTS | $(get_rating security_review_rating) |"
+            if [ "$HOTSPOTS" -gt 0 ]; then
+              echo -e "\n### Security Hotspot Details"
               echo "| Probability | Category | Component |"
               echo "|---|---|---|"
               jq -r '.hotspots[] | "| \(.vulnerabilityProbability) | \(.securityCategory) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
             fi
 
-            # --- COVERAGE ---
-            echo -e "\n## 🟢 Coverage"
+            echo -e "\n## Coverage & 👥 Duplication"
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Overall Line Coverage | $(metric coverage || echo 0)% |"
-
-            # --- DUPLICATION ---
-            echo -e "\n## 👥 Duplication"
-            echo "| Metric | Value |"
-            echo "|---|---|"
+            echo "| Overall Line Coverage | ${COV}% |"
             echo "| Duplicated Lines (%) | $(metric duplicated_lines_density || echo 0)% |"
 
-            # --- SIZE ---
-            echo -e "\n## 📏 Size"
-            echo "| Metric | Value |"
-            echo "|---|---|"
-            echo "| Lines of Code (NCLOC) | $(metric ncloc || echo 0) |"
-
-            # --- ISSUES (VULNERABILITIES) ---
-            echo -e "\n## 🚨 Issues (Vulnerabilities)"
+            echo -e "\n## Size & Issues"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Vulnerabilities | $(metric vulnerabilities || echo 0) | $(get_rating security_rating) |"
-            if [ "$(jq '.issues[] | select(.type=="VULNERABILITY") | .key' out/issues.json | wc -l)" -gt 0 ]; then
-               echo -e "\n### 🛡️ Vulnerability Details"
+            echo "| Lines of Code (NCLOC) | $(metric ncloc || echo 0) | - |"
+            VULNS=$(metric vulnerabilities || echo 0)
+            echo "| Vulnerabilities | $VULNS | $(get_rating security_rating) |"
+            if [ "$VULNS" -gt 0 ]; then
+               echo -e "\n### Vulnerability Details"
                echo "| Severity | Message | File |"
+               echo "|---|---|---|"
                jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-          } > "$REPORT"
-          
+            echo "## Metrics Evolution"
+            echo "Comparing **${PREV_VERSION}** ➡️ **${VERSION}**"
+            echo ""
+            echo "| Metric | ${PREV_VERSION} | ${VERSION} | Trend |"
+            echo "|---|---|---|---|"
+            trend() { if [ "$2" -gt "$1" ]; then echo "🔺"; elif [ "$2" -lt "$1" ]; then echo "🔻"; else echo "➖"; fi; }
+            echo "| Bugs | $OLD_BUGS | $BUGS | $(trend $OLD_BUGS $BUGS) |"
+            echo "| Code Smells | $OLD_SMELLS | $SMELLS | $(trend $OLD_SMELLS $SMELLS) |"
+            echo "| Coverage | ${OLD_COV}% | ${COV}% | $(trend $OLD_COV $COV) |"
+            echo ""
+            echo "### Visual Trend"
+            echo "\`\`\`mermaid"
+            echo "graph LR"
+            echo "  B1(Bugs: $OLD_BUGS) --> B2(Bugs: $BUGS)"
+            echo "  S1(Smells: $OLD_SMELLS) --> S2(Smells: $SMELLS)"
+            echo "\`\`\`"
+            
+          } >> "$REPORT"
+
+      # 4. PUBLISH TO WIKI
       - name: Publish to Wiki
         env:
-          REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          cd wiki_repo
+          cp ../out/Code-Quality-${VERSION}.md .
           git config --global user.email "github-actions@github.com"
           git config --global user.name "github-actions"
-          
-          # Clone the wiki repository
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.wiki.git" wiki_repo
-          
-          # Copy the generated report to the wiki folder
-          cp out/Code-Quality-${VERSION}.md wiki_repo/
-          
-          cd wiki_repo
           git add .
-          git commit -m "Update quality report for ${VERSION}" || echo "No changes"
+          git commit -m "Add SonarCloud report for ${VERSION}" || echo "No changes"
           git push
