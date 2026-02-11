@@ -50,7 +50,7 @@ jobs:
             -Dsonar.sources=.
             -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/.venv/**,**/__pycache__/**
 
-      - name: Generate Detailed SonarCloud Report
+      - name: Generate High-Detail SonarCloud Report
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
@@ -59,20 +59,17 @@ jobs:
           mkdir -p out
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          echo "Waiting for SonarCloud background processing..."
-          sleep 45 
-
-          # 1. Fetch Overall Measures
+          # 1. Fetch Measures (Overall Code)
           curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,vulnerabilities,security_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc" \
+            "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc,vulnerabilities,security_rating" \
             > out/metrics.json
 
-          # 2. Fetch Security Hotspots (MUST use projectKey)
+          # 2. Fetch Security Hotspots (ProjectKey is mandatory here)
           curl -s -u "${SONAR_TOKEN}:" \
             "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}" \
             > out/hotspots.json
 
-          # 3. Fetch All Issues (Bugs, Smells)
+          # 3. Fetch Issues (Bugs, Smells, Vulnerabilities)
           curl -s -u "${SONAR_TOKEN}:" \
             "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=100" \
             > out/issues.json
@@ -84,54 +81,48 @@ jobs:
           }
 
           {
-            echo "# 📊 Quality Report: ${VERSION} (Overall Code)"
+            echo "# 🚀 Deep Quality Report: ${VERSION}"
             echo "---"
 
             # --- RELIABILITY ---
-            BUGS=$(metric bugs || echo 0)
             echo "## 🔴 Reliability"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Bugs | $BUGS | $(get_rating reliability_rating) |"
-            if [ "$BUGS" -gt 0 ]; then
+            echo "| Total Bugs | $(metric bugs || echo 0) | $(get_rating reliability_rating) |"
+            if [ "$(jq '.issues[] | select(.type=="BUG") | .key' out/issues.json | wc -l)" -gt 0 ]; then
               echo -e "\n### 🐞 Bug Details"
               echo "| Severity | Message | File |"
               jq -r '.issues[] | select(.type=="BUG") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
             # --- MAINTAINABILITY ---
-            SMELLS=$(metric code_smells || echo 0)
             echo -e "\n## 🟡 Maintainability"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Code Smells | $SMELLS | $(get_rating sqale_rating) |"
-            if [ "$SMELLS" -gt 0 ]; then
+            echo "| Code Smells | $(metric code_smells || echo 0) | $(get_rating sqale_rating) |"
+            if [ "$(jq '.issues[] | select(.type=="CODE_SMELL") | .key' out/issues.json | wc -l)" -gt 0 ]; then
               echo -e "\n### 🧹 Code Smell Details"
               echo "| Severity | Message | File |"
               jq -r '.issues[] | select(.type=="CODE_SMELL") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            # --- SECURITY REVIEW ---
-            # NOTE: Hotspots use different field names (message might be null, so we use ruleKey as fallback)
-            HOTSPOTS=$(metric security_hotspots || echo 0)
+            # --- SECURITY REVIEW (HOTSPOTS) ---
             echo -e "\n## 🟠 Security Review"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Hotspots to Review | $HOTSPOTS | $(get_rating security_review_rating) |"
-            
-            if [ "$HOTSPOTS" -gt 0 ]; then
+            echo "| Hotspots to Review | $(metric security_hotspots || echo 0) | $(get_rating security_review_rating) |"
+            if [ "$(jq '.hotspots | length' out/hotspots.json)" -gt 0 ]; then
               echo -e "\n### 🔍 Security Hotspot Details"
-              echo "| Category | Message/Rule | File |"
+              echo "| Probability | Category | Component |"
               echo "|---|---|---|"
-              # We use 'message // ruleKey' to ensure the table isn't empty if the message field is null
-              jq -r '.hotspots[] | "| \(.securityCategory) | \(.message // .ruleKey) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
+              jq -r '.hotspots[] | "| \(.vulnerabilityProbability) | \(.securityCategory) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
             fi
 
             # --- COVERAGE ---
             echo -e "\n## 🟢 Coverage"
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Unit Test Coverage | $(metric coverage || echo 0)% |"
+            echo "| Overall Line Coverage | $(metric coverage || echo 0)% |"
 
             # --- DUPLICATION ---
             echo -e "\n## 👥 Duplication"
@@ -143,22 +134,19 @@ jobs:
             echo -e "\n## 📏 Size"
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Lines of Code (ncloc) | $(metric ncloc || echo 0) |"
+            echo "| Lines of Code (NCLOC) | $(metric ncloc || echo 0) |"
 
             # --- ISSUES (VULNERABILITIES) ---
-            VULNS=$(metric vulnerabilities || echo 0)
-            echo -e "\n## 🚨 Issues"
-            echo "| Type | Total Count | Rating |"
+            echo -e "\n## 🚨 Issues (Vulnerabilities)"
+            echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
-            echo "| Vulnerabilities | $VULNS | $(get_rating security_rating) |"
-            if [ "$VULNS" -gt 0 ]; then
-              echo -e "\n### 🛡️ Vulnerability Details"
-              echo "| Severity | Message | File |"
-              jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+            echo "| Vulnerabilities | $(metric vulnerabilities || echo 0) | $(get_rating security_rating) |"
+            if [ "$(jq '.issues[] | select(.type=="VULNERABILITY") | .key' out/issues.json | wc -l)" -gt 0 ]; then
+               echo -e "\n### 🛡️ Vulnerability Details"
+               echo "| Severity | Message | File |"
+               jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            echo -e "\n---"
-            echo "_[Full Dashboard](https://sonarcloud.io/dashboard?id=${SONAR_PROJECT_KEY})_"
           } > "$REPORT"
           
       - name: Publish to Wiki
