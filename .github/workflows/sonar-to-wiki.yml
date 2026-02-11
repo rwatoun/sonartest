@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1. CLONE WIKI FIRST (To read previous version data)
+      # 1. CLONE WIKI FIRST
       - name: Clone Wiki
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,12 +55,11 @@ jobs:
           mkdir -p out
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          echo "Waiting for SonarCloud API to refresh..."
+          echo "Waiting for SonarCloud API..."
           sleep 45 
 
           # Fetch Overall Data
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc,vulnerabilities,security_rating" > out/metrics.json
-          # Note: We save this as hotspot_list.json to match the loop below
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}&status=TO_REVIEW" > out/hotspot_list.json
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=100" > out/issues.json
 
@@ -70,10 +69,11 @@ jobs:
             val=$(metric "$1"); case "${val%.*}" in 1) echo "A" ;; 2) echo "B" ;; 3) echo "C" ;; 4) echo "D" ;; 5) echo "E" ;; *) echo "N/A" ;; esac
           }
 
-          # Get current values for evolution comparison
+          # Get current values
           BUGS=$(metric bugs || echo 0)
           SMELLS=$(metric code_smells || echo 0)
           COV=$(metric coverage || echo 0)
+          HOTSPOTS=$(metric security_hotspots || echo 0)
 
           # --- EVOLUTION LOGIC ---
           MAJOR=$(echo $VERSION | cut -d. -f1 | tr -d 'v')
@@ -81,20 +81,19 @@ jobs:
           PREV_VERSION="v${PREV_MAJOR}.0.0"
           PREV_FILE="wiki_repo/Code-Quality-${PREV_VERSION}.md"
 
-          # Guard: Check if previous file exists
           HAS_PREV=false
           if [ -f "$PREV_FILE" ]; then
             HAS_PREV=true
             OLD_BUGS=$(grep "| Total Bugs |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
             OLD_SMELLS=$(grep "| Code Smells |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
             OLD_COV=$(grep "| Overall Line Coverage |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' %' || echo 0)
+            OLD_HOTSPOTS=$(grep "| Hotspots to Review |" "$PREV_FILE" | awk -F'|' '{print $3}' | tr -d ' ' || echo 0)
           fi
 
           {
             echo "# Deep Quality Report: ${VERSION}"
             echo "---"
 
-            # --- SECTIONS ---
             echo -e "\n## Reliability"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
@@ -118,7 +117,6 @@ jobs:
             fi
 
             echo -e "\n## Security Review"
-            HOTSPOTS=$(metric security_hotspots || echo 0)
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
             echo "| Hotspots to Review | $HOTSPOTS | $(get_rating security_review_rating) |"
@@ -126,21 +124,14 @@ jobs:
               echo -e "\n### Security Review: Hotspot Details"
               echo "| Probability | Message | File:Line |"
               echo "|---|---|---|"
-              
-              # Loop through each hotspot key found in the search
               for key in $(jq -r '.hotspots[].key' out/hotspot_list.json); do
-                # Fetch the specific details for this hotspot
                 curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/hotspots/show?hotspot=$key" > out/temp_hotspot.json
-                
-                # Extract details based on the schema you provided
                 PROB=$(jq -r '.rule.vulnerabilityProbability' out/temp_hotspot.json)
                 MSG=$(jq -r '.message' out/temp_hotspot.json)
                 FILE=$(jq -r '.component.path' out/temp_hotspot.json)
                 LINE=$(jq -r '.line' out/temp_hotspot.json)
-                
                 echo "| $PROB | $MSG | \`$FILE:$LINE\` |" >> "$REPORT"
               done
-              echo ""
             fi
 
             echo -e "\n## Coverage & Duplication"
@@ -162,7 +153,7 @@ jobs:
                jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            # --- METRICS EVOLUTION (GUARDED) ---
+            # --- METRICS EVOLUTION (WITH HOTSPOTS) ---
             if [ "$HAS_PREV" = true ]; then
               echo -e "\n## Metrics Evolution"
               echo "Comparing **${PREV_VERSION}** & **${VERSION}**"
@@ -172,6 +163,7 @@ jobs:
               trend() { if [ "$(echo "$2 > $1" | bc -l)" -eq 1 ]; then echo "🔺"; elif [ "$(echo "$2 < $1" | bc -l)" -eq 1 ]; then echo "🔻"; else echo "➖"; fi; }
               echo "| Bugs | $OLD_BUGS | $BUGS | $(trend $OLD_BUGS $BUGS) |"
               echo "| Code Smells | $OLD_SMELLS | $SMELLS | $(trend $OLD_SMELLS $SMELLS) |"
+              echo "| Hotspots | $OLD_HOTSPOTS | $HOTSPOTS | $(trend $OLD_HOTSPOTS $HOTSPOTS) |"
               echo "| Coverage | ${OLD_COV}% | ${COV}% | $(trend $OLD_COV $COV) |"
               echo ""
               echo "### Visual Trend"
@@ -179,6 +171,7 @@ jobs:
               echo "graph LR"
               echo "  B1(Bugs: $OLD_BUGS) --> B2(Bugs: $BUGS)"
               echo "  S1(Smells: $OLD_SMELLS) --> S2(Smells: $SMELLS)"
+              echo "  H1(Hotspots: $OLD_HOTSPOTS) --> H2(Hotspots: $HOTSPOTS)"
               echo "\`\`\`"
             fi
             
