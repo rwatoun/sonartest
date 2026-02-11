@@ -127,7 +127,7 @@ jobs:
               jq -r '.hotspots[] | "| \(.vulnerabilityProbability) | \(.securityCategory) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
             fi
 
-            echo -e "\n## Coverage & 👥 Duplication"
+            echo -e "\n## Coverage & Duplication"
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Overall Line Coverage | ${COV}% |"
@@ -147,7 +147,7 @@ jobs:
             fi
 
             echo "## Metrics Evolution"
-            echo "Comparing **${PREV_VERSION}** ➡️ **${VERSION}**"
+            echo "Comparing **${PREV_VERSION}** & **${VERSION}**"
             echo ""
             echo "| Metric | ${PREV_VERSION} | ${VERSION} | Trend |"
             echo "|---|---|---|---|"
