@@ -26,14 +26,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1. CLONE WIKI FIRST
+      # 1. cloning wiki
       - name: Clone Wiki
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki_repo
 
-      # 2. RUN SONAR SCAN
+      # 2. running sonar scan
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v6
         env:
@@ -45,8 +45,8 @@ jobs:
             -Dsonar.sources=.
             -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/.venv/**,**/__pycache__/**
 
-      # 3. GENERATE ENHANCED REPORT
-      - name: Generate Detailed SonarCloud Report
+      # 3. generating report
+      - name: Generate SonarCloud Report
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
@@ -58,29 +58,30 @@ jobs:
           echo "Waiting for SonarCloud API..."
           sleep 45 
 
-          # Fetch Overall Data
+          # fetching overall data
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc,vulnerabilities,security_rating" > out/metrics.json
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}&status=TO_REVIEW" > out/hotspot_list.json
           curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=100" > out/issues.json
 
-          # Helper functions
+          # helper functions
           metric () { jq -r --arg k "$1" '.component.measures[]? | select(.metric==$k) | .value' out/metrics.json | head -n 1; }
           get_rating () {
             val=$(metric "$1"); case "${val%.*}" in 1) echo "A" ;; 2) echo "B" ;; 3) echo "C" ;; 4) echo "D" ;; 5) echo "E" ;; *) echo "N/A" ;; esac
           }
 
-          # Get current values
+          # getting current values
           BUGS=$(metric bugs || echo 0)
           SMELLS=$(metric code_smells || echo 0)
           COV=$(metric coverage || echo 0)
           HOTSPOTS=$(metric security_hotspots || echo 0)
 
-          # --- EVOLUTION LOGIC ---
+          # evolution logic!!
           MAJOR=$(echo $VERSION | cut -d. -f1 | tr -d 'v')
           PREV_MAJOR=$((MAJOR - 1))
           PREV_VERSION="v${PREV_MAJOR}.0.0"
           PREV_FILE="wiki_repo/Code-Quality-${PREV_VERSION}.md"
 
+          # if no previous versions
           HAS_PREV=false
           if [ -f "$PREV_FILE" ]; then
             HAS_PREV=true
@@ -91,7 +92,7 @@ jobs:
           fi
 
           {
-            echo "# Deep Quality Report: ${VERSION}"
+            echo "# Code Quality Report - ${VERSION}"
             echo "---"
 
             echo -e "\n## Reliability"
@@ -153,7 +154,7 @@ jobs:
                jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
-            # --- METRICS EVOLUTION (WITH HOTSPOTS) ---
+            # metrics evolution
             if [ "$HAS_PREV" = true ]; then
               echo -e "\n## Metrics Evolution"
               echo "Comparing **${PREV_VERSION}** & **${VERSION}**"
@@ -177,7 +178,7 @@ jobs:
             
           } >> "$REPORT"
 
-      # 4. PUBLISH TO WIKI
+      # 4. publishing to wiki
       - name: Publish to Wiki
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
