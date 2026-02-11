@@ -59,7 +59,7 @@ jobs:
           mkdir -p out
           REPORT="out/Code-Quality-${VERSION}.md"
 
-          echo "Waiting for SonarCloud to finalize analysis..."
+          echo "Waiting for SonarCloud background processing..."
           sleep 45 
 
           # 1. Fetch Overall Measures
@@ -67,14 +67,14 @@ jobs:
             "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=alert_status,bugs,reliability_rating,vulnerabilities,security_rating,code_smells,sqale_rating,security_hotspots,security_review_rating,coverage,duplicated_lines_density,ncloc" \
             > out/metrics.json
 
-          # 2. Fetch Security Hotspots (Specific API)
+          # 2. Fetch Security Hotspots (MUST use projectKey)
           curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}&status=TO_REVIEW" \
+            "https://sonarcloud.io/api/hotspots/search?projectKey=${SONAR_PROJECT_KEY}" \
             > out/hotspots.json
 
-          # 3. Fetch Issues (Bugs, Smells, Vulnerabilities)
+          # 3. Fetch All Issues (Bugs, Smells)
           curl -s -u "${SONAR_TOKEN}:" \
-            "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=50" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=100" \
             > out/issues.json
 
           # Helper Functions
@@ -112,15 +112,19 @@ jobs:
             fi
 
             # --- SECURITY REVIEW ---
+            # NOTE: Hotspots use different field names (message might be null, so we use ruleKey as fallback)
             HOTSPOTS=$(metric security_hotspots || echo 0)
             echo -e "\n## 🟠 Security Review"
             echo "| Metric | Value | Rating |"
             echo "|---|---|---|"
             echo "| Hotspots to Review | $HOTSPOTS | $(get_rating security_review_rating) |"
+            
             if [ "$HOTSPOTS" -gt 0 ]; then
               echo -e "\n### 🔍 Security Hotspot Details"
-              echo "| Category | Message | File |"
-              jq -r '.hotspots[] | "| \(.securityCategory) | \(.message) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
+              echo "| Category | Message/Rule | File |"
+              echo "|---|---|---|"
+              # We use 'message // ruleKey' to ensure the table isn't empty if the message field is null
+              jq -r '.hotspots[] | "| \(.securityCategory) | \(.message // .ruleKey) | \(.component | split(":") | .[-1]) |"' out/hotspots.json >> "$REPORT"
             fi
 
             # --- COVERAGE ---
@@ -139,17 +143,18 @@ jobs:
             echo -e "\n## 📏 Size"
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Lines of Code (ncloc) | $(metric ncloc) |"
+            echo "| Lines of Code (ncloc) | $(metric ncloc || echo 0) |"
 
-            # --- GENERAL ISSUES ---
+            # --- ISSUES (VULNERABILITIES) ---
             VULNS=$(metric vulnerabilities || echo 0)
-            echo -e "\n## 🚨 Issues Summary"
-            echo "| Type | Total |"
+            echo -e "\n## 🚨 Issues"
+            echo "| Type | Total Count | Rating |"
             echo "|---|---|---|"
-            echo "| Vulnerabilities | $VULNS |"
+            echo "| Vulnerabilities | $VULNS | $(get_rating security_rating) |"
             if [ "$VULNS" -gt 0 ]; then
-               echo -e "\n### 🛡️ Vulnerability Details"
-               jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
+              echo -e "\n### 🛡️ Vulnerability Details"
+              echo "| Severity | Message | File |"
+              jq -r '.issues[] | select(.type=="VULNERABILITY") | "| \(.severity) | \(.message) | \(.component | split(":") | .[-1]) |"' out/issues.json >> "$REPORT"
             fi
 
             echo -e "\n---"
